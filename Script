@@ -1,0 +1,308 @@
+# 📦 Install required packages
+!pip install --quiet google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client requests
+!pip install --upgrade google-auth google-auth-oauthlib google-auth-httplib2
+
+# 🔑 Zoom Credentials
+ZOOM_CLIENT_ID = '9MpWV6srRxGTsB036hx0XA'
+ZOOM_CLIENT_SECRET = 'wzZxaJ2bX4P3ny2P5rXhBd6S123QXpzh'
+ZOOM_ACCOUNT_EMAIL = 'm.b.abdelaal@gmail.com'
+ZOOM_ACCOUNT_ID= '_3OXeCueT6uwrE_gvlfKsw'
+
+# 🎯 Get Zoom Access Token
+import base64
+import requests
+
+zoom_auth = base64.b64encode(f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()).decode()
+zoom_headers = {
+    'Authorization': f'Basic {zoom_auth}',
+    'Content-Type': 'application/x-www-form-urlencoded'
+}
+zoom_data = {
+    'grant_type': 'account_credentials',
+    'account_id': ZOOM_ACCOUNT_ID
+}
+# zoom_token_response = requests.post('https://zoom.us/oauth/token', headers=zoom_headers, data=zoom_data)
+# print("Zoom token response status:", zoom_token_response.status_code)
+# print("Zoom token response body:", zoom_token_response.text)
+# zoom_token = zoom_token_response.json()['access_token']
+
+try:
+    response = requests.post('https://zoom.us/oauth/token', headers=zoom_headers, data=zoom_data, timeout=30)
+    response.raise_for_status()
+    zoom_token = response.json()['access_token']
+    print("✅ Zoom access token obtained.")
+except Exception as e:
+    print(f"❌ Failed to get Zoom token: {e}")
+    exit()
+
+# Configure retry strategy
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+session = requests.Session()
+retry_strategy = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[408, 429, 500, 502, 503, 504]
+)
+adapter = HTTPAdapter(max_retries=retry_strategy)
+session.mount("https://", adapter)
+
+zoom_auth = base64.b64encode(f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()).decode()
+zoom_headers = {'Authorization': f'Basic {zoom_auth}',
+    'Content-Type': 'application/x-www-form-urlencoded'
+}
+zoom_data = {
+    'grant_type': 'account_credentials',
+    'account_id': ZOOM_ACCOUNT_ID
+}
+
+try:
+    zoom_token_response = session.post(
+        'https://zoom.us/oauth/token',
+        headers=zoom_headers,
+        data=zoom_data,
+        timeout=30
+    )
+    zoom_token_response.raise_for_status()
+    zoom_token = zoom_token_response.json()['access_token']
+    print("✅ Successfully obtained Zoom access token")
+except Exception as e:
+    print(f"❌ Failed to get Zoom token: {e}")
+    exit()
+
+from datetime import datetime, timedelta
+
+# Set a wider range – go back e.g. 6 months
+to_date = datetime.utcnow().date()
+from_date = to_date - timedelta(days=180)
+
+# Convert to string format required by Zoom
+from_str = from_date.isoformat()
+to_str = to_date.isoformat()
+# 📥 Fetch all Zoom recordings using correct pagination
+all_recordings = []
+next_page_token = ''
+page_size = 30  # You can use up to 300
+
+print("⏳ Fetching all Zoom recordings...")
+
+while True:
+    try:
+        from_str = '2025-04-1'
+        to_str = '2025-04-15'
+        url = (
+            f"https://api.zoom.us/v2/users/{ZOOM_ACCOUNT_EMAIL}/recordings"
+            f"?page_size={page_size}"
+            f"&from={from_str}&to={to_str}"
+        )
+        # url = f"https://api.zoom.us/v2/users/{ZOOM_ACCOUNT_EMAIL}/recordings?page_size={page_size}"
+        if next_page_token:
+            url += f"&next_page_token={next_page_token}"
+
+        response = session.get(url, headers={'Authorization': f'Bearer {zoom_token}'}, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        meetings = data.get('meetings', [])
+        if not meetings:
+          print("✅ No more meetings to fetch.")
+          break
+
+        all_recordings.extend(meetings)
+        print(f"📄 Retrieved {len(meetings)} meetings (Total: {len(all_recordings)})")
+
+        next_page_token = data.get('next_page_token')
+        if not next_page_token:
+            break
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error fetching recordings: {e}")
+        break
+
+# 🎞️ Extract MP4 recording files
+videos = []
+for meeting in all_recordings:
+    date_str = meeting["start_time"].split("T")[0]
+    for file in meeting.get("recording_files", []):
+        if file['file_type'] == 'MP4':
+            videos.append({
+                "download_url": file['download_url'],
+                "filename": f"{meeting['topic'].replace('/', '-')}_{file['id']}.mp4",
+                "date": date_str
+            })
+
+print(f"\n📦 Found {len(videos)} MP4 recordings across {len(all_recordings)} meetings.")
+
+# 🔐 Authenticate to Google Drive
+from google.colab import files
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+import os
+
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
+
+# Check for existing token
+if os.path.exists('token.json'):
+    creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+
+else:
+    # THIS IS WHERE YOU PUT THE FLOW CODE (new version)
+    flow = InstalledAppFlow.from_client_secrets_file(
+        'credentials.json',
+        scopes=SCOPES,
+        redirect_uri='urn:ietf:wg:oauth:2.0:oob'  # ← Critical line
+    )
+    auth_url, _ = flow.authorization_url(prompt='consent')
+    print("🔗 Go to this URL and authorize:", auth_url)
+    code = input("✏️ Paste the authorization code here: ")
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    # Save the token for next run
+    with open('token.json', 'w') as token:
+        token.write(creds.to_json())
+
+# Build the Drive service
+drive_service = build('drive', 'v3', credentials=creds)
+
+# 📁 Create date-based folder if needed
+def get_or_create_folder(folder_name):
+    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    items = results.get('files', [])
+    if items:
+        return items[0]['id']
+    else:
+        folder_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
+        folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
+        return folder['id']
+
+# 📤 Upload to Google Drive
+from io import BytesIO
+from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.errors import HttpError
+from time import sleep
+import requests.exceptions
+
+print(f"\n🚀 Starting upload of {len(videos)} recordings...")
+
+for video in videos:
+    print(f"Processing: {video['filename']}")
+
+    # 1. Get or create folder
+    folder_id = get_or_create_folder(video['date'])
+
+    # 2. Download Zoom recording
+    zoom_response = requests.get(
+        video['download_url'],
+        headers={'Authorization': f'Bearer {zoom_token}'},
+        stream=True
+    )
+    zoom_response.raise_for_status()
+
+    # 3. Create in-memory file-like object
+    file_stream = BytesIO()
+    for chunk in zoom_response.iter_content(chunk_size=8192):
+        file_stream.write(chunk)
+    file_stream.seek(0)
+
+    # 4. Create proper media upload object
+    media = MediaIoBaseUpload(
+        file_stream,
+        mimetype='video/mp4',
+        resumable=True
+    )
+
+# 📤 Upload to Google Drive
+from io import BytesIO
+from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.errors import HttpError  # Add this import
+import requests.exceptions  # Add this import
+
+print(f"\n🚀 Starting upload of {len(videos)} recordings...")
+
+for i, video in enumerate(videos, 1):
+    print(f"\n📤 Processing {i}/{len(videos)}: {video['filename']}")
+
+    try:
+        # 1. Get or create folder
+        folder_id = get_or_create_folder(video['date'])
+
+        # 2. Download Zoom recording
+        zoom_response = requests.get(
+            video['download_url'],
+            headers={'Authorization': f'Bearer {zoom_token}'},
+            stream=True
+        )
+        zoom_response.raise_for_status()
+
+        # 3. Create in-memory file-like object
+        file_stream = BytesIO()
+        for chunk in zoom_response.iter_content(chunk_size=1048576):
+            file_stream.write(chunk)
+        file_stream.seek(0)
+
+        # 4. Create proper media upload object
+        media = MediaIoBaseUpload(
+            file_stream,
+            mimetype='video/mp4',
+            resumable=True
+        )
+
+        # 5. Upload to Drive (WITH ERROR HANDLING)
+        file_metadata = {
+            'name': video['filename'],
+            'parents': [folder_id]
+        }
+
+        try:
+            upload_response = drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id'
+            ).execute()
+            print(f"✅ Uploaded to: https://drive.google.com/file/d/{upload_response['id']}/view")
+            sleep(5)  # Avoid rate limits
+        except HttpError as error:
+            print(f"❌ Google Drive upload failed: {error}")
+            continue  # Skip to next video if this one fails
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Zoom download failed: {e}")
+        continue
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        continue
+
+print("\n🎉 All available recordings processed!")
+
+
+
+
+
+
+
+
+from google.colab import files
+
+# 📁 Upload your credentials.json file from your local machine
+uploaded = files.upload()
+
+# 🧠 Make sure it's named correctly
+if 'credentials.json' not in uploaded:
+    print("❌ Please make sure the file is named exactly 'credentials.json'")
+else:
+    print("✅ credentials.json uploaded successfully.")
+
+
+
+
+
+
+
+
+
+
+
